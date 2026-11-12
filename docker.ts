@@ -1,17 +1,20 @@
-import type { DevcontainerConfig } from "./types.js";
 import { run } from "./exec.js";
+import { runtimeBin } from "./runtime.js";
+import type { DevcontainerConfig } from "./types.js";
 
-export async function ensureDockerContainer(cfg: DevcontainerConfig, onData?: (data: Buffer) => void): Promise<void> {
+/** Bring up a config the CLI cannot serve, through the runtime the config names. */
+export async function ensureContainer(cfg: DevcontainerConfig, onData?: (data: Buffer) => void): Promise<void> {
+	const bin = runtimeBin(cfg.runtime);
 	const name = cfg.containerName;
 	if (!cfg.image) {
 		throw new Error(
-			'devcontainer.json has no "image" field and the devcontainer CLI is not available; cannot run the container with plain docker',
+			`devcontainer.json has no "image" field and the devcontainer CLI is not available; cannot run the container with plain ${bin}`,
 		);
 	}
-	const inspect = await run("docker", ["inspect", "-f", "{{.State.Status}}", name]);
+	const inspect = await run(bin, ["inspect", "-f", "{{.State.Status}}", name]);
 	if (inspect.code === 0) {
 		if (inspect.stdout.trim() === "running") return;
-		await run("docker", ["start", name], onData, 0);
+		await run(bin, ["start", name], onData, 0);
 		return;
 	}
 	// Container does not exist - create it, mounting the config root
@@ -31,7 +34,7 @@ export async function ensureDockerContainer(cfg: DevcontainerConfig, onData?: (d
 	// `docker run` with a local image exits in seconds — only the pull is
 	// long, and that is exactly the case the cap must not break).
 	const r = await run(
-		"docker",
+		bin,
 		[
 			"run",
 			"-d",
@@ -53,5 +56,5 @@ export async function ensureDockerContainer(cfg: DevcontainerConfig, onData?: (d
 		onData,
 		0,
 	);
-	if (r.code !== 0) throw new Error(`docker run failed: ${r.stderr.trim()}`);
+	if (r.code !== 0) throw new Error(`${bin} run failed: ${r.stderr.trim()}`);
 }

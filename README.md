@@ -2,6 +2,11 @@
 
 Pi extension: run project commands inside a project's devcontainer.
 
+Fork of [`luxuride-pi-extensions/pi-devcontainer`](https://github.com/luxuride-pi-extensions/pi-devcontainer)
+at v0.1.2 that adds Podman as a selectable container runtime. Nothing else
+changed: Docker stays the default, so upstream behavior is untouched until the
+runtime is set to `podman`.
+
 `bash` stays on the host. This extension registers a `devcontainer` tool whose
 commands run INSIDE the container, so the two filesystems never silently swap
 under the model: the tool result reports both the container path it ran in and
@@ -25,10 +30,13 @@ actually up, so a project without a devcontainer sees no tool it cannot serve.
   bare `devcontainer.json`) and pi is not already inside a container:
   - with the `devcontainer` CLI, `devcontainer up` runs in the BACKGROUND at
     session start (never blocking the prompt); the first tool call awaits it,
-    streaming pull/build progress into the tool row and the status bar;
-  - without the CLI, a plain `docker run` fallback mounts the workspace at its
-    host path and keeps the container alive — but only for image-based configs;
-    build/dockerCompose configs require the CLI.
+    streaming pull/build progress into the tool row and the status bar. With
+    `runtime: "podman"` every CLI call also carries `--docker-path podman`,
+    which is what makes the CLI disable SELinux labeling and map the rootless
+    uid;
+  - without the CLI, a plain `docker run` (or `podman run`) fallback mounts
+    the workspace at its host path and keeps the container alive — but only for
+    image-based configs; build/dockerCompose configs require the CLI.
 - Container ports are published on the host as the container opens them,
   announced as `container port -> host 127.0.0.1:<high port>` mappings. Host
   ports come from the ephemeral range so nothing already listening is
@@ -61,54 +69,55 @@ devcontainer:
 
 ```jsonc
 {
+  "runtime": "podman",      // docker (default) or podman
   "features": { /* merged via devcontainer up --additional-features */ },
   "provision": [ "bash -lc command lines run once per container" ]
 }
 ```
 
+`PI_DEVCONTAINER_RUNTIME=podman` overrides the file for one run, so switching
+runtimes does not need an edit.
+
 Provisioning is idempotent (marker file in the container's `$HOME`) and
 best-effort: a failure warns and the tools stay available.
+
+## Podman
+
+Set `"runtime": "podman"` in the global override (or export
+`PI_DEVCONTAINER_RUNTIME=podman`). Every runtime call — `up`, `exec`, `ps`,
+`inspect`, provisioning and port forwarding — then goes through `podman`
+instead of `docker`, and the CLI is passed `--docker-path podman` on each
+invocation. Requires Podman 4 or newer and the devcontainer CLI
+(`npm install -g @devcontainers/cli`, 0.90 tested).
+
+Rootless Podman needs care with file ownership: the container runs as the
+image's user, and anything other than root cannot write the host-owned
+workspace through the default userns mapping. Add the mapping to the project
+config when the container user is not root:
+
+```jsonc
+{ "runArgs": ["--userns=keep-id"] }
+```
+
+Two things still differ from Docker, both from rootless networking and
+building:
+
+- Automatic port relaying is skipped when the runtime reports no
+  host-routable container IP (pasta/bridge under rootless Podman). Declare the
+  ports in `devcontainer.json` `forwardPorts` instead — the CLI publishes them
+  with `-p` at `up` time.
+- Feature and Dockerfile builds run through `podman build`; the CLI's BuildKit
+  path needs `buildx`, which Podman does not provide. Image-only configs are
+  unaffected.
 
 ## Install
 
 ```bash
-pi install npm:@luxuride-pi/devcontainer
+pi install /path/to/pi-devcontainer
 ```
 
 The extension is TypeScript loaded from source; there is no build step.
 
-## Releases
-
-Every release is both a **git tag** and an npm package. The package publishes
-as `@luxuride-pi/devcontainer` from the release workflow via npm trusted
-publishing (OIDC from GitHub Actions — no publish token exists anywhere).
-
-pi can also install this extension from a **git ref**: pi clones, checks out
-the ref, runs `npm install --legacy-peer-deps`, and loads the extension's
-TypeScript straight from source — so a tag *is* the artifact; there is no
-build step and nothing to compile.
-
-### Install a release
-
-```bash
-pi install npm:@luxuride-pi/devcontainer@^<version>
-# or, pinned to a git tag:
-pi install git:github.com/luxuride-pi-extensions/pi-devcontainer@v<version>
-```
-
-### Cut a release
-
-1. Bump `version` in `package.json` and commit that on its own.
-2. Tag the commit that contains the bump — the tag and the version must agree:
-   ```bash
-   git tag v<version> && git push origin master --tags
-   ```
-3. `.github/workflows/release.yml` packs the tarball, checks it, and publishes
-   the release with generated notes.
-
-The workflow refuses to guess: it fails when the tag is not on the commit being
-released, and again when the tag does not match `package.json`'s `version`.
-Bump the version *before* tagging; the tag is not the place to bump.
 
 ## License
 

@@ -28,6 +28,7 @@ import type { Scaffold } from "./scaffold.js";
 import { collectionsIn, featuresInCollection, loadCatalog, parseFeaturesPage, parseRef, publishedVersions, searchFeatures } from "./features-index.js";
 import { MAX_DISPLAY_BYTES_FOR_TEST, OutputTail } from "./render.js";
 import { parseListeningPorts, parseSocatListenPort, socatArgs } from "./ports.js";
+import { cliRuntimeArgs, parseRuntime, runtimeBin } from "./runtime.js";
 import { truncateTail } from "@earendil-works/pi-coding-agent";
 import type { DevcontainerConfig } from "./types.js";
 
@@ -305,6 +306,50 @@ checkTrue("alreadyInContainer is a boolean", typeof alreadyInContainer() === "bo
 		check("docker fallback resolves against the project dir", docker.containerCwd, join(projectCwd, "sub"));
 		check("docker fallback host path equals container path", docker.hostCwd, join(projectCwd, "sub"));
 	} finally {
+		rmSync(bin, { recursive: true, force: true });
+		rmSync(projectCwd, { recursive: true, force: true });
+	}
+}
+
+// --- runtime selection --------------------------------------------------
+{
+	check("the runtime defaults to docker", runtimeBin(undefined), "docker");
+	check("podman is its own binary", runtimeBin("podman"), "podman");
+	check("the CLI is pointed at podman", cliRuntimeArgs("podman"), ["--docker-path", "podman"]);
+	check("docker adds no CLI flags", cliRuntimeArgs(undefined), []);
+	check("an unknown runtime is ignored", parseRuntime("nerdctl"), undefined);
+
+	const bin = mkdtempSync(join(tmpdir(), "dc-rt-bin-"));
+	const projectCwd = mkdtempSync(join(tmpdir(), "dc-rt-proj-"));
+	const realPath = process.env.PATH ?? "";
+	// Only podman exists on this PATH: a fallback that still spawned `docker`
+	// would fail with ENOENT instead of running the command.
+	writeFileSync(join(bin, "podman"), '#!/bin/sh\nfor last; do :; done\nprintf %s "$last"\nexit 0\n');
+	chmodSync(join(bin, "podman"), 0o755);
+	// The fake CLI prints its arguments, so the injected flag is asserted.
+	writeFileSync(join(bin, "devcontainer"), '#!/bin/sh\nprintf \'%s\\n\' "$@"\nexit 0\n');
+	chmodSync(join(bin, "devcontainer"), 0o755);
+	const prevPath = process.env.PATH;
+	process.env.PATH = `${bin}:${realPath}`;
+	try {
+		const cfg: DevcontainerConfig = {
+			projectCwd,
+			canonicalCwd: projectCwd,
+			configRoot: projectCwd,
+			configPath: join(projectCwd, ".devcontainer", "devcontainer.json"),
+			configDefaulted: true,
+			containerName: "pi-devcontainer-rt",
+			workspaceFolder: projectCwd,
+			useCli: false,
+			runtime: "podman",
+		};
+		const fallback = await runInContainer(cfg, { command: "echo hi" });
+		check("podman drives the fallback exec", fallback.output, `cd '${projectCwd}' && echo hi`);
+
+		const cli = await runInContainer({ ...cfg, useCli: true, remoteWorkspace: "/workspaces/rt" }, { command: "echo hi" });
+		checkTrue("the CLI is told to use podman", cli.output.includes("--docker-path\npodman"), cli.output);
+	} finally {
+		process.env.PATH = prevPath;
 		rmSync(bin, { recursive: true, force: true });
 		rmSync(projectCwd, { recursive: true, force: true });
 	}

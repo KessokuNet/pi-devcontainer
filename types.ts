@@ -1,5 +1,8 @@
 import type { BringUpLog } from "./progress.js";
 
+/** Host container runtime a project is driven through. */
+export type ContainerRuntime = "docker" | "podman";
+
 export interface DevcontainerConfig {
 	projectCwd: string;
 	/** canonical (symlink-resolved) project path — what the kernel sees */
@@ -14,6 +17,8 @@ export interface DevcontainerConfig {
 	 *  passed to the CLI as an explicit --config. */
 	configDefaulted: boolean;
 	containerName: string;
+	/** Undefined behaves as docker, matching upstream. */
+	runtime?: ContainerRuntime;
 	image?: string;
 	/**
 	 * Host folder to bind-mount. With the devcontainer CLI this MUST be the

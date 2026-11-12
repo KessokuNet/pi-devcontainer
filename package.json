@@ -1,10 +1,11 @@
 {
-  "name": "@luxuride-pi/devcontainer",
-  "version": "0.1.2",
-  "description": "pi extension: run project commands inside the project's devcontainer",
+  "name": "@korewachino/pi-devcontainer",
+  "version": "0.2.0",
+  "description": "pi extension: run project commands inside the project's devcontainer (docker or podman)",
   "keywords": [
     "devcontainer",
     "docker",
+    "podman",
     "pi-extension",
     "pi-package"
   ],
@@ -23,6 +24,7 @@
     "provision.ts",
     "render.ts",
     "run-in-container.ts",
+    "runtime.ts",
     "scaffold.ts",
     "types.ts"
   ],
@@ -48,6 +50,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/luxuride-pi-extensions/pi-devcontainer.git"
+    "url": "git+https://github.com/KessokuNet/pi-devcontainer.git"
   }
 }

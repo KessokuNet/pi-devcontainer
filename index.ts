@@ -64,7 +64,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { alreadyInContainer, hasDevcontainerCli, loadDevcontainerJson } from "./config.js";
-import { ensureDockerContainer } from "./docker.js";
+import { ensureContainer } from "./docker.js";
 import { run } from "./exec.js";
 import { loadGlobalOverride } from "./override.js";
 import { provisionContainer } from "./provision.js";
@@ -74,6 +74,7 @@ import { collectionsIn, featuresInCollection, loadCatalog, publishedVersions, se
 import { asJsonObject, parseJsonc } from "./jsonc.js";
 import { PortForwarder, findCliContainer } from "./ports.js";
 import { BringUpLog, describePhase, startProgressWidget } from "./progress.js";
+import { cliRuntimeArgs, resolveRuntime, runtimeBin } from "./runtime.js";
 import { BASE_IMAGES, describeDockerAccess, detectStack, projectProfile, scaffold } from "./scaffold.js";
 import type { DevcontainerConfig } from "./types.js";
 
@@ -155,9 +156,9 @@ export default function (pi: ExtensionAPI) {
 		// The CLI names its own container; the name this extension invents is
 		// for the docker-fallback container only. Both modes are covered,
 		// because neither is the other's container.
-		const container = c.useCli ? await findCliContainer(c.configRoot) : c.containerName;
+		const container = c.useCli ? await findCliContainer(c.configRoot, c.runtime) : c.containerName;
 		if (!container) return;
-		const f = new PortForwarder(container, {
+		const f = new PortForwarder(container, c.runtime, {
 			onNotice: say,
 			// The tool result repeats the mapping for the model, which cannot
 			// see a status-bar notice; the user's own copy comes from here.
@@ -509,6 +510,9 @@ export default function (pi: ExtensionAPI) {
 			// fall back to the raw path
 		}
 		const configDefaulted = canonicalConfigPath === join(canonicalRoot, ".devcontainer", "devcontainer.json");
+		// Loaded before the config object so the runtime it names is part of
+		// every later decision, including the CLI flags.
+		const override = loadGlobalOverride();
 		const c: DevcontainerConfig = {
 			projectCwd: projectDir,
 			canonicalCwd,
@@ -517,10 +521,11 @@ export default function (pi: ExtensionAPI) {
 			configDefaulted,
 			// Include a short hash of the canonical path: two projects sharing a
 			// basename (e.g. ~/work/api and ~/oss/api) would otherwise collide
-			// on one container name, and `ensureDockerContainer` would happily
+			// on one container name, and `ensureContainer` would happily
 			// `docker start` the OTHER project's container and run every
 			// command against the wrong mount.
 			containerName: `pi-devcontainer-${basename(projectDir)}-${createHash("sha256").update(canonicalCwd).digest("hex").slice(0, 6)}`,
+			runtime: resolveRuntime(override.runtime),
 			image,
 			// Overwritten below once the execution mode is known.
 			workspaceFolder: declaredWorkspaceFolder,
@@ -544,8 +549,8 @@ export default function (pi: ExtensionAPI) {
 			"info",
 		);
 
-		// Loaded once and shared by both execution modes.
-		const override = loadGlobalOverride();
+		// Shared by both execution modes; the override file's runtime decides
+		// which binary drives the container (see runtime.ts).
 
 		if (c.useCli) {
 			// `devcontainer exec` does not create the container on its own —
@@ -566,7 +571,7 @@ export default function (pi: ExtensionAPI) {
 			// Anything the rebuild tool was given is appended to `up` verbatim,
 			// so `--no-cache` reaches the CLI without this extension having to
 			// model a flag set that grows with every CLI release.
-			const upArgs = ["up", "--workspace-folder", wsFolder];
+			const upArgs = ["up", "--workspace-folder", wsFolder, ...cliRuntimeArgs(c.runtime)];
 			if (!c.configDefaulted) upArgs.push("--config", c.configPath);
 			upArgs.push(...extraArgs);
 			if (override.features && Object.keys(override.features).length > 0) {
@@ -614,6 +619,7 @@ export default function (pi: ExtensionAPI) {
 				if (!remoteWorkspace) {
 					const probe = await run("devcontainer", [
 						"exec",
+						...cliRuntimeArgs(c.runtime),
 						"--workspace-folder",
 						wsFolder,
 						"--",
@@ -639,7 +645,7 @@ export default function (pi: ExtensionAPI) {
 				if (override.provision && override.provision.length > 0) {
 					await provisionContainer(
 						notify,
-						["devcontainer", "exec", "--workspace-folder", wsFolder, "--"],
+						["devcontainer", "exec", ...cliRuntimeArgs(c.runtime), "--workspace-folder", wsFolder, "--"],
 						override.provision,
 						// Same object handed to `--additional-features` above, so
 						// the provisioning marker key tracks the image rebuild
@@ -663,7 +669,7 @@ export default function (pi: ExtensionAPI) {
 			// cannot be pointed at it) and the mount keeps the host path valid
 			// inside the container. Provisioning runs afterwards; its marker
 			// lives in the container's own $HOME — which is root for most
-			// images but NOT forced (see ensureDockerContainer).
+			// images but NOT forced (see ensureContainer).
 			c.workspaceFolder = declaredWorkspaceFolder;
 			if (override.features && Object.keys(override.features).length > 0) {
 				notify(
@@ -674,9 +680,9 @@ export default function (pi: ExtensionAPI) {
 			const log = new BringUpLog();
 			c.bringUpLog = log;
 			c.pendingUp = (async () => {
-				await ensureDockerContainer(c, (d) => log.append(d.toString()));
+				await ensureContainer(c, (d) => log.append(d.toString()));
 				if (override.provision && override.provision.length > 0) {
-					await provisionContainer(notify, ["docker", "exec", c.containerName], override.provision);
+					await provisionContainer(notify, [runtimeBin(c.runtime), "exec", c.containerName], override.provision);
 				}
 				notify(
 					`Devcontainer ready: ${c.containerName} — workspace mounted at ${c.workspaceFolder} (host paths stay valid)`,

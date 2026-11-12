@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { asJsonObject, parseJsonc, type JsonValue } from "./jsonc.js";
+import type { ContainerRuntime } from "./types.js";
+import { parseRuntime } from "./runtime.js";
 
 /**
  * Global devcontainer override: ~/.devcontainer/pi-override.json (JSONC).
@@ -13,9 +15,11 @@ import { asJsonObject, parseJsonc, type JsonValue } from "./jsonc.js";
  *     "features": { ... },   // merged in via `devcontainer up
  *                            //   --additional-features` (may trigger an
  *                            //   image rebuild once per feature set)
- *     "provision": [ ... ]   // bash -lc command lines, run once per
+ *     "provision": [ ... ],  // bash -lc command lines, run once per
  *                            //   container (marker file in $HOME keyed
  *                            //   by the sha256 of the command set)
+ *     "runtime": "podman"    // docker (default) or podman; also settable
+ *                            //   per run with PI_DEVCONTAINER_RUNTIME
  *   }
  *
  * Provisioning is best-effort: a failure warns and the tools stay available.
@@ -25,6 +29,7 @@ export const GLOBAL_OVERRIDE_PATH = join(homedir(), ".devcontainer", "pi-overrid
 export interface GlobalOverride {
 	features?: Record<string, JsonValue>;
 	provision?: string[];
+	runtime?: ContainerRuntime;
 	path: string;
 }
 
@@ -37,7 +42,7 @@ export function loadGlobalOverride(): GlobalOverride {
 		const provision = Array.isArray(obj.provision)
 			? obj.provision.filter((c): c is string => typeof c === "string" && c.trim() !== "")
 			: undefined;
-		return { features, provision, path: GLOBAL_OVERRIDE_PATH };
+		return { features, provision, runtime: parseRuntime(obj.runtime), path: GLOBAL_OVERRIDE_PATH };
 	} catch {
 		return { path: GLOBAL_OVERRIDE_PATH };
 	}

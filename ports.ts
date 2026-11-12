@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 
 import { run } from "./exec.js";
+import { runtimeBin } from "./runtime.js";
+import type { ContainerRuntime } from "./types.js";
 
 /**
  * Publish ports the container opens on to the host, as they open.
@@ -124,8 +126,8 @@ export function parseSocatListenPort(line: string): number {
  * project and keeps it running, so the name this extension invents for its
  * own docker-fallback container is never the right one to inspect.
  */
-export async function findCliContainer(configRoot: string): Promise<string | null> {
-	const r = await run("docker", [
+export async function findCliContainer(configRoot: string, runtime?: ContainerRuntime): Promise<string | null> {
+	const r = await run(runtimeBin(runtime), [
 		"ps",
 		"--filter",
 		`label=devcontainer.local_folder=${configRoot}`,
@@ -145,9 +147,12 @@ export class PortForwarder {
 	private published: ForwardedPort[] = [];
 	/** Container ports already published by `devcontainer up` itself. */
 	private declared = new Set<number>();
+	/** Whether the no-routable-IP notice has been shown. */
+	private noticedNoIp = false;
 
 	constructor(
 		private readonly containerName: string,
+		private readonly runtime: ContainerRuntime | undefined,
 		private readonly events: ForwarderEvents = {},
 	) {}
 
@@ -165,7 +170,7 @@ export class PortForwarder {
 	}
 
 	private async declaredContainerPorts(): Promise<number[]> {
-		const r = await run("docker", [
+		const r = await run(runtimeBin(this.runtime), [
 			"inspect",
 			"-f",
 			"{{range $p, $conf := .NetworkSettings.Ports}}{{$p}} {{end}}",
@@ -180,7 +185,7 @@ export class PortForwarder {
 	}
 
 	private async containerIp(): Promise<string | null> {
-		const r = await run("docker", ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", this.containerName]);
+		const r = await run(runtimeBin(this.runtime), ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", this.containerName]);
 		const ip = r.stdout.trim();
 		return r.code === 0 && ip ? ip : null;
 	}
@@ -214,10 +219,19 @@ export class PortForwarder {
 		if (this.relays.size > 32) return; // a runaway listener loop is not a dev server
 		// Both families in one exec: two docker round trips per poll would be
 		// wasted on a loop this frequent.
-		const listening = await run("docker", ["exec", this.containerName, "cat", "/proc/net/tcp", "/proc/net/tcp6"]);
+		const listening = await run(runtimeBin(this.runtime), ["exec", this.containerName, "cat", "/proc/net/tcp", "/proc/net/tcp6"]);
 		if (listening.code !== 0) return; // container restarting or gone
 		const ip = await this.containerIp();
-		if (!ip) return;
+		if (!ip) {
+			// Rootless podman has no host-routable container IP; declared ports still work via -p.
+			if (!this.noticedNoIp) {
+				this.noticedNoIp = true;
+				this.events.onNotice?.(
+					"devcontainer: the runtime reports no host-routable container IP, so ports opened later are not relayed — declare them in devcontainer.json forwardPorts (published with -p) instead",
+				);
+			}
+			return;
+		}
 		for (const port of parseListeningPorts(listening.stdout)) {
 			if (this.relays.has(port) || this.declared.has(port) || SKIP_PORTS.has(port)) continue;
 			this.relay(ip, port);
