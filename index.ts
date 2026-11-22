@@ -73,7 +73,7 @@ import { createDevcontainerRenderers, OutputTail, UPDATE_THROTTLE_MS, type Devco
 import { collectionsIn, featuresInCollection, loadCatalog, publishedVersions, searchFeatures, type CatalogFeature } from "./features-index.js";
 import { asJsonObject, parseJsonc } from "./jsonc.js";
 import { PortForwarder, findCliContainer } from "./ports.js";
-import { BringUpLog, describePhase, startProgressWidget } from "./progress.js";
+import { BringUpLog, describePhase, startBringUpHeartbeat, startProgressWidget } from "./progress.js";
 import { cliRuntimeArgs, resolveRuntime, runtimeBin } from "./runtime.js";
 import { BASE_IMAGES, describeDockerAccess, detectStack, projectProfile, scaffold } from "./scaffold.js";
 import type { DevcontainerConfig } from "./types.js";
@@ -82,6 +82,20 @@ const TOOL_NAME = "devcontainer";
 const CREATE_TOOL_NAME = "create_devcontainer";
 const REBUILD_TOOL_NAME = "devcontainer_rebuild";
 const DEFAULT_TIMEOUT = 120;
+
+/**
+ * Run one bring-up body with a heartbeat on its log, so a phase that prints
+ * nothing (a build step, the postCreateCommand, an override provision command)
+ * still moves the waiting tool row instead of freezing it.
+ */
+async function trackedBringUp(log: BringUpLog, body: () => Promise<void>): Promise<void> {
+	const stopHeartbeat = startBringUpHeartbeat(log);
+	try {
+		await body();
+	} finally {
+		stopHeartbeat();
+	}
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.registerFlag("no-devcontainer", {
@@ -589,7 +603,7 @@ export default function (pi: ExtensionAPI) {
 			// CLI writes its progress to stderr as bare-CR frames.
 			const log = new BringUpLog();
 			c.bringUpLog = log;
-			c.pendingUp = (async () => {
+			c.pendingUp = trackedBringUp(log, async () => {
 				// Uncapped: a first-run pull can run for many minutes and makes
 				// steady progress the whole time (see run()'s timeout contract).
 				const up = await run("devcontainer", upArgs, (d) => log.append(d.toString()), 0);
@@ -651,6 +665,9 @@ export default function (pi: ExtensionAPI) {
 						// the provisioning marker key tracks the image rebuild
 						// the CLI is about to perform.
 						override.features,
+						// Streamed into the bring-up log: a provision command (a
+						// package install) is often the longest silence of all.
+						(d) => log.append(d.toString()),
 					);
 				}
 				notify(
@@ -661,7 +678,7 @@ export default function (pi: ExtensionAPI) {
 				// that is still being built reports nothing, and a poll loop
 				// racing `up` would need to be told when to start.
 				void startPortForwarder(root, c, notify);
-			})();
+			});
 		} else {
 			// docker fallback: bring the container up in the background (a
 			// first-run image pull can take a long time and must not block the
@@ -679,16 +696,22 @@ export default function (pi: ExtensionAPI) {
 			}
 			const log = new BringUpLog();
 			c.bringUpLog = log;
-			c.pendingUp = (async () => {
+			c.pendingUp = trackedBringUp(log, async () => {
 				await ensureContainer(c, (d) => log.append(d.toString()));
 				if (override.provision && override.provision.length > 0) {
-					await provisionContainer(notify, [runtimeBin(c.runtime), "exec", c.containerName], override.provision);
+					await provisionContainer(
+						notify,
+						[runtimeBin(c.runtime), "exec", c.containerName],
+						override.provision,
+						undefined,
+						(d) => log.append(d.toString()),
+					);
 				}
 				notify(
 					`Devcontainer ready: ${c.containerName} — workspace mounted at ${c.workspaceFolder} (host paths stay valid)`,
 					"info",
 				);
-			})();
+			});
 		}
 
 		// Offered as soon as bring-up is STARTED: the first tool call awaits

@@ -72,6 +72,37 @@ export class BringUpLog implements BringUpProgress {
 }
 
 /**
+ * Keep the bring-up log moving while the process itself says nothing.
+ *
+ * `devcontainer up` goes quiet for long stretches: the CLI runs the image
+ * build and the postCreateCommand without printing anything in between, and
+ * a waiting tool call then shows a frozen row for minutes with no way to tell
+ * a slow dnf from a wedged one. A line every `intervalMs` states how long the
+ * work has been running and when output last arrived, so the row moves and
+ * the silence has a number on it.
+ */
+export function startBringUpHeartbeat(log: BringUpProgress, intervalMs = 15_000): () => void {
+	const started = Date.now();
+	let lastSize = log.snapshot().length;
+	let lastChange = started;
+	const handle = setInterval(() => {
+		const size = log.snapshot().length;
+		const at = Date.now();
+		if (size !== lastSize) {
+			lastSize = size;
+			lastChange = at;
+			return;
+		}
+		const elapsed = Math.round((at - started) / 1000);
+		const silent = Math.round((at - lastChange) / 1000);
+		log.append(`pi: devcontainer up still running — ${elapsed}s elapsed, no output for ${silent}s\n`);
+	}, intervalMs);
+	// The heartbeat must never be the reason the process stays alive.
+	handle.unref?.();
+	return () => clearInterval(handle);
+}
+
+/**
  * Which part of the pull/build the log is showing, judged from what docker
  * prints.
  *

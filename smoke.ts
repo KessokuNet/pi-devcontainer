@@ -21,7 +21,7 @@ import { asJsonObject, parseJsonc } from "./jsonc.js";
 import { alreadyInContainer, loadDevcontainerJson } from "./config.js";
 import { provisionContainer } from "./provision.js";
 import { containerAlive, resolveToolCwd, runInContainer, settleBringUp } from "./run-in-container.js";
-import { BringUpLog, describePhase, startProgressWidget } from "./progress.js";
+import { BringUpLog, describePhase, startBringUpHeartbeat, startProgressWidget } from "./progress.js";
 import { DEFAULT_RUN_TIMEOUT, shq, run } from "./exec.js";
 import { DOCKER_IN_DOCKER_FEATURE, DOCKER_OUTSIDE_OF_DOCKER_FEATURE, BASE_IMAGE, BASE_IMAGES, DOTNET_FEATURE, NODE_FEATURE, STACK_FEATURES, baseImageFor, describeDockerAccess, featureFor, projectProfile, scaffold, stackIds } from "./scaffold.js";
 import type { Scaffold } from "./scaffold.js";
@@ -641,6 +641,36 @@ checkTrue("alreadyInContainer is a boolean", typeof alreadyInContainer() === "bo
 	checkTrue("the oldest line is dropped", !log.snapshot().includes("frame 1\n"));
 }
 
+// --- bring-up heartbeat -----------------------------------------------
+// A build step, the postCreateCommand or a provision install prints nothing
+// for minutes at a time. The log has to keep moving, or the waiting row is
+// indistinguishable from a hung container and the user cancels a bring-up
+// that was working.
+{
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+	const log = new BringUpLog();
+	const stop = startBringUpHeartbeat(log, 30);
+	await sleep(120);
+	stop();
+	const lines = log.snapshot().split("\n").filter(Boolean);
+	checkTrue("a silent bring-up is reported as still running", lines.some((l) => l.includes("still running")), lines.join(" | "));
+	checkTrue("the heartbeat names the elapsed time", /\d+s elapsed/.test(log.snapshot()), log.snapshot());
+	const after = log.snapshot();
+	await sleep(120);
+	check("the heartbeat stops when bring-up ends", log.snapshot(), after);
+
+	// Output arriving on its own is progress enough; a heartbeat on top of it
+	// would only push the real lines out of the bounded log.
+	const busy = new BringUpLog();
+	const stopBusy = startBringUpHeartbeat(busy, 60);
+	for (let i = 0; i < 8; i++) {
+		busy.append(`step ${i}\n`);
+		await sleep(20);
+	}
+	stopBusy();
+	checkTrue("no heartbeat while output is arriving", !busy.snapshot().includes("still running"), busy.snapshot());
+}
+
 // --- the display tail can be handed over ------------------------------
 // The row shows pull progress during bring-up and then the command's own
 // output, so the tail has to be able to start over without being replaced.
@@ -726,6 +756,18 @@ checkTrue("alreadyInContainer is a boolean", typeof alreadyInContainer() === "bo
 			provisionContainer(() => {}, [join(bin, "devcontainer")], provision, features).then(logLines);
 		check("failing command still ran its command", await run(['echo ran >> "$HOME/ran.log"; false']), 5);
 		check("failing command is retried (no marker written)", await run(['echo ran >> "$HOME/ran.log"; false']), 6);
+
+		// The command's own output has to reach the caller: an install is the
+		// longest silence in a bring-up, and the row would show nothing for it.
+		const chunks: string[] = [];
+		await provisionContainer(
+			() => {},
+			[join(bin, "devcontainer"), "exec"],
+			["echo streamed-line"],
+			{},
+			(d) => chunks.push(d.toString()),
+		);
+		checkTrue("provision output is streamed", chunks.join("").includes("streamed-line"), chunks.join(""));
 	} finally {
 		process.env.PATH = prevPath;
 		if (prevHome === undefined) delete process.env.HOME;
